@@ -1,0 +1,66 @@
+From 008a9e2f44fafb63590f812b2094eae3806fd5fc Mon Sep 17 00:00:00 2001
+From: Nuthasith Gerdpratoom <nuthasith.g@gmail.com>
+Date: Wed, 21 Oct 2026 00:20:55 +0800
+Subject: [PATCH 3/4] Config switch for cross-camera feature tracking
+
+---
+ .../include/d2frontend/d2featuretracker.h      |  1 +
+ d2frontend/src/d2featuretracker.cpp            | 18 ++++++++++--------
+ d2frontend/src/d2frontend_params.cpp           |  3 +++
+ 3 files changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/d2frontend/include/d2frontend/d2featuretracker.h b/d2frontend/include/d2frontend/d2featuretracker.h
+index 094ff64..c3023ed 100644
+--- a/d2frontend/include/d2frontend/d2featuretracker.h
++++ b/d2frontend/include/d2frontend/d2featuretracker.h
+@@ -53,6 +53,7 @@ struct D2FTConfig {
+     double search_local_max_dist = 0.04; //To multiply with width
+     double search_local_max_dist_lr = 0.2; //To multiply with width
+     double knn_match_ratio = 0.8;
++    bool enable_cross_cam_track = true;  // match features between neighbouring fisheyes
+     std::string output_folder = "/root/output/";
+     std::string superglue_model_path;
+     double landmark_distance_assumption = 100.0; // For uninitialized landmark, assume it is 100 meter away
+diff --git a/d2frontend/src/d2featuretracker.cpp b/d2frontend/src/d2featuretracker.cpp
+index c38a86e..3b66c9d 100644
+--- a/d2frontend/src/d2featuretracker.cpp
++++ b/d2frontend/src/d2featuretracker.cpp
+@@ -123,14 +123,16 @@ bool D2FeatureTracker::trackLocalFrames(VisualImageDescArray &frames) {
+     report.compose(track(frames.images[1], frames.motion_prediction));
+     report.compose(track(frames.images[2], frames.motion_prediction));
+     report.compose(track(frames.images[3], frames.motion_prediction));
+-    report.compose(
+-        track(frames.images[0], frames.images[1], true, LEFT_RIGHT_IMG_MATCH));
+-    report.compose(
+-        track(frames.images[1], frames.images[2], true, LEFT_RIGHT_IMG_MATCH));
+-    report.compose(
+-        track(frames.images[2], frames.images[3], true, LEFT_RIGHT_IMG_MATCH));
+-    report.compose(
+-        track(frames.images[0], frames.images[3], true, RIGHT_LEFT_IMG_MATCH));
++    if (_config.enable_cross_cam_track) {
++      report.compose(
++          track(frames.images[0], frames.images[1], true, LEFT_RIGHT_IMG_MATCH));
++      report.compose(
++          track(frames.images[1], frames.images[2], true, LEFT_RIGHT_IMG_MATCH));
++      report.compose(
++          track(frames.images[2], frames.images[3], true, LEFT_RIGHT_IMG_MATCH));
++      report.compose(
++          track(frames.images[0], frames.images[3], true, RIGHT_LEFT_IMG_MATCH));
++    }
+   }
+   if (isKeyframe(report) && frames.send_to_backend) {
+     iskeyframe = true;
+diff --git a/d2frontend/src/d2frontend_params.cpp b/d2frontend/src/d2frontend_params.cpp
+index 18e698f..93fa295 100644
+--- a/d2frontend/src/d2frontend_params.cpp
++++ b/d2frontend/src/d2frontend_params.cpp
+@@ -188,6 +188,9 @@ D2FrontendParams::D2FrontendParams(ros::NodeHandle& nh) {
+         feature_min_dist);
+   }
+   ftconfig->track_from_keyframe = (int)fsSettings["track_from_keyframe"];
++  if (!fsSettings["enable_cross_cam_track"].empty()) {
++    ftconfig->enable_cross_cam_track = (int)fsSettings["enable_cross_cam_track"];
++  }
+   // Loop detector
+   loopdetectorconfig->enable_homography_test =
+       (int)fsSettings["enable_homography_test"];

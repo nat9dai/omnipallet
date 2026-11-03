@@ -1,0 +1,46 @@
+<launch>
+    <!-- D2VINS only (CPU build): loop closure and PGO need the GPU SuperPoint / NetVLAD networks, so they stay off. -->
+    <arg name="config" default="/root/config/sim/quadcam_sim.yaml" />
+    <arg name="output_path" default="/root/output/" />
+    <arg name="show" default="false" />
+    <node pkg="d2vins" type="d2vins_node" name="d2vins" output="screen" required="true">
+        <rosparam>
+            lcm_uri: udpm://224.0.0.251:7667?ttl=1
+            jpg_quality: 75
+            query_thres: 0.2
+            init_query_thres: 0.2
+            min_movement_keyframe: 0.1
+            enable_pub_remote_img: false
+            enable_sub_remote_img: false
+            accept_min_3d_pts: 30
+            recv_msg_duration: 0.5
+            superpoint_thres: 0.1
+            triangle_thres: 0.012
+            min_direction_loop: 4
+            detector_match_thres: 0.7
+            send_all_features: false
+            lower_cam_as_main: false
+            min_match_per_dir: 10
+            output_raw_superpoint_desc: false
+            depth_far_thres: 100
+            loop_cov_pos: 0.1
+            odometry_consistency_threshold: 3.0
+            pos_covariance_per_meter: 0.01
+            yaw_covariance_per_meter: 0.003
+            enable_network: false
+        </rosparam>
+        <param name="output_path" value="$(arg output_path)" type="string" />
+        <param name="show" value="$(arg show)" type="bool" />
+        <param name="send_img" value="false" type="bool" />
+        <param name="send_whole_img_desc" value="false" type="bool" />
+        <param name="self_id" value="1" type="int" />
+        <param name="main_id" value="1" type="int" />
+        <param name="match_index_dist" value="200" type="int" />
+        <param name="match_index_dist_remote" value="20" type="int" />
+        <param name="nonkeyframe_waitsec" value="5.0" type="double" />
+        <param name="inter_drone_init_frames" value="3" type="int" />
+        <param name="vins_config_path" value="$(arg config)" type="string" />
+        <param name="enable_loop" value="false" type="bool" />
+        <param name="is_4dof" value="false" type="bool" />
+    </node>
+</launch>

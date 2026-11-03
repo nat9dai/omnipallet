@@ -1,0 +1,246 @@
+From f3f42b2ddc6d7a18cc3cf28a6d9e506186221338 Mon Sep 17 00:00:00 2001
+From: Nuthasith G <nuthasith.g@gmail.com>
+Date: Wed, 21 Oct 2026 01:58:13 +0800
+Subject: [PATCH 4/4] Make quad-fisheye cross-camera tracking work on the CPU
+ build
+
+- opticalflowTrackPyr (CPU) ignored the shifted start points; pass OPTFLOW_USE_INITIAL_FLOW
+  as the GPU path already does, so cross-camera LK finds matches at all
+- TrackReport::compose now sums stereo_point_num
+- cross_cam_min_disparity: drop cross-camera matches too close to the far-point prediction,
+  whose depth over a short baseline is noise and biased short
+- cross_cam_guess_distance: optional depth-aware start point for cross-camera LK
+- log the number of landmarks shared by neighbouring cameras once a second
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../include/d2frontend/d2featuretracker.h     |  6 ++-
+ .../include/d2frontend/opticaltrack_utils.h   |  4 +-
+ d2frontend/src/d2featuretracker.cpp           | 51 ++++++++++++++++---
+ d2frontend/src/d2frontend_params.cpp          |  6 +++
+ d2frontend/src/opticaltrack_utils.cpp         | 31 ++++++++---
+ 5 files changed, 81 insertions(+), 17 deletions(-)
+
+diff --git a/d2frontend/include/d2frontend/d2featuretracker.h b/d2frontend/include/d2frontend/d2featuretracker.h
+index c3023ed..56eddbb 100644
+--- a/d2frontend/include/d2frontend/d2featuretracker.h
++++ b/d2frontend/include/d2frontend/d2featuretracker.h
+@@ -54,6 +54,8 @@ struct D2FTConfig {
+     double search_local_max_dist_lr = 0.2; //To multiply with width
+     double knn_match_ratio = 0.8;
+     bool enable_cross_cam_track = true;  // match features between neighbouring fisheyes
++    double cross_cam_min_disparity = 0.0;  // px from the far-point prediction; below this the baseline gives no depth
++    double cross_cam_guess_distance = -1;  // m; > 0 seeds cross-camera LK with the extrinsic prediction at this range
+     std::string output_folder = "/root/output/";
+     std::string superglue_model_path;
+     double landmark_distance_assumption = 100.0; // For uninitialized landmark, assume it is 100 meter away
+@@ -85,6 +87,7 @@ struct TrackReport {
+         long_track_num += report.long_track_num;
+         unmatched_num += report.unmatched_num;
+         remote_matched_num += report.remote_matched_num;
++        stereo_point_num += report.stereo_point_num;
+     }
+ 
+     double meanParallex() const {
+@@ -156,7 +159,8 @@ protected:
+     bool matchLocalFeatures(const VisualImageDesc & img_desc_a, const VisualImageDesc & img_desc_b, std::vector<int> & ids_down_to_up, 
+         const MatchLocalFeatureParams & param);
+     std::map<LandmarkIdType, cv::Point2f> predictLandmarksWithExtrinsic(int camera_index, 
+-            std::vector<LandmarkIdType> pts_ids, std::vector<Eigen::Vector3d> pts_3d_norm, const Swarm::Pose & cam_pose_a, const Swarm::Pose & cam_pose_b) const;
++            std::vector<LandmarkIdType> pts_ids, std::vector<Eigen::Vector3d> pts_3d_norm, const Swarm::Pose & cam_pose_a, const Swarm::Pose & cam_pose_b,
++            double distance = -1) const;
+     std::vector<cv::Point2f> predictLandmarks(const VisualImageDesc & img_desc_a, 
+             const Swarm::Pose & cam_pose_a, const Swarm::Pose & cam_pose_b, bool use_extrinsic=false) const;
+ public:
+diff --git a/d2frontend/include/d2frontend/opticaltrack_utils.h b/d2frontend/include/d2frontend/opticaltrack_utils.h
+index 35f2827..e08f171 100644
+--- a/d2frontend/include/d2frontend/opticaltrack_utils.h
++++ b/d2frontend/include/d2frontend/opticaltrack_utils.h
+@@ -47,9 +47,11 @@ LKImageInfoGPU opticalflowTrackPyr(
+     const cv::Mat &cur_img, const LKImageInfoGPU& prev_lk,
+     TrackLRType type = WHOLE_IMG_MATCH);
+ 
++// guess: optional start point in cur_img per landmark id (cross-camera only); default is a pure 90 deg shift
+ LKImageInfoCPU opticalflowTrackPyr(
+     const cv::Mat &cur_img, const LKImageInfoCPU& prev_lk,
+-    TrackLRType type = WHOLE_IMG_MATCH);
++    TrackLRType type = WHOLE_IMG_MATCH,
++    const std::map<LandmarkIdType, cv::Point2f> *guess = nullptr);
+ 
+ std::vector<cv::DMatch>
+ matchKNN(const cv::Mat &desc_a, const cv::Mat &desc_b,
+diff --git a/d2frontend/src/d2featuretracker.cpp b/d2frontend/src/d2featuretracker.cpp
+index 3b66c9d..8c09b62 100644
+--- a/d2frontend/src/d2featuretracker.cpp
++++ b/d2frontend/src/d2featuretracker.cpp
+@@ -133,6 +133,18 @@ bool D2FeatureTracker::trackLocalFrames(VisualImageDescArray &frames) {
+       report.compose(
+           track(frames.images[0], frames.images[3], true, RIGHT_LEFT_IMG_MATCH));
+     }
++    if (frames.frame_id % 25 == 0) {
++      // landmarks seen by two neighbouring cameras in this frame: these carry the metric baseline
++      int shared[4] = {0, 0, 0, 0};
++      for (int c = 0; c < 4; c++) {
++        std::set<LandmarkIdType> ids;
++        for (auto &lm : frames.images[c].landmarks) ids.insert(lm.landmark_id);
++        for (auto &lm : frames.images[(c + 1) % 4].landmarks)
++          if (lm.landmark_id >= 0 && ids.count(lm.landmark_id)) shared[c]++;
++      }
++      SPDLOG_INFO("[Track] frame {} landmarks {} shared 01 {} 12 {} 23 {} 30 {}", frames.frame_id,
++                  frames.landmarkNum(), shared[0], shared[1], shared[2], shared[3]);
++    }
+   }
+   if (isKeyframe(report) && frames.send_to_backend) {
+     iskeyframe = true;
+@@ -727,8 +739,16 @@ TrackReport D2FeatureTracker::trackLK(const VisualImageDesc &left_frame,
+         right_frame.extrinsic);
+   }
+   if (!left_lk_info.lk_ids.empty()) {
+-    auto cur_lk_info =
+-        opticalflowTrackPyr(right_frame.raw_image, left_lk_info, type);
++    std::map<LandmarkIdType, cv::Point2f> guess;
++    if (_config.cross_cam_guess_distance > 0) {
++      guess = predictLandmarksWithExtrinsic(
++          left_frame.camera_index, left_lk_info.lk_ids, left_lk_info.lk_pts_3d_norm,
++          left_frame.extrinsic, right_frame.extrinsic, _config.cross_cam_guess_distance);
++    }
++    auto cur_lk_info = opticalflowTrackPyr(right_frame.raw_image, left_lk_info, type,
++                                           guess.empty() ? nullptr : &guess);
++    int n_created = 0, n_kept = 0;
++    double pred_err = 0;
+     for (unsigned int i = 0; i < cur_lk_info.lk_pts.size(); i++) {
+       auto ret =
+           createLKLandmark(right_frame, cur_lk_info.lk_pts[i],
+@@ -736,17 +756,30 @@ TrackReport D2FeatureTracker::trackLK(const VisualImageDesc &left_frame,
+       if (!ret.first) {
+         continue;
+       }
++      n_created++;
++      auto pred = pts_pred_a_on_b.at(cur_lk_info.lk_ids[i]);
++      double disparity = cv::norm(pred - cur_lk_info.lk_pts[i]);
++      pred_err += disparity;
++      // a far point across a short baseline gets a depth from noise alone, and that depth is biased short
++      if (disparity < _config.cross_cam_min_disparity) {
++        continue;
++      }
+       auto &lm = ret.second;
+       lm.stamp_discover = lmanager->at(cur_lk_info.lk_ids[i]).stamp_discover;
+       lm.velocity = extractPointVelocity(lm);
+       lmanager->updateLandmark(lm);
+-      auto pred = pts_pred_a_on_b.at(cur_lk_info.lk_ids[i]);
+       if (!_config.lk_lk_use_pred ||
+-          cv::norm(pred - cur_lk_info.lk_pts[i]) <
+-              _config.search_local_max_dist_lr * image_width) {
++          disparity < _config.search_local_max_dist_lr * image_width) {
+         right_frame.landmarks.emplace_back(lm);
++        n_kept++;
+       }
+     }
++    if (left_frame.frame_id % 25 == 0) {
++      SPDLOG_DEBUG("[TrackLR] cam {}->{} type {} left {} flow {} created {} kept {} mean pred err {:.1f}px (gate {:.1f})",
++                  left_frame.camera_index, right_frame.camera_index, (int)type, left_lk_info.lk_ids.size(),
++                  cur_lk_info.lk_pts.size(), n_created, n_kept, n_created ? pred_err / n_created : 0.0,
++                  _config.search_local_max_dist_lr * image_width);
++    }
+ 
+     report.stereo_point_num = right_frame.landmarks.size();
+   }
+@@ -1299,12 +1332,14 @@ std::map<LandmarkIdType, cv::Point2f>
+ D2FeatureTracker::predictLandmarksWithExtrinsic(
+     int camera_index, std::vector<LandmarkIdType> pts_ids,
+     std::vector<Eigen::Vector3d> pts_3d_norm, const Swarm::Pose &cam_pose_a,
+-    const Swarm::Pose &cam_pose_b) const {
++    const Swarm::Pose &cam_pose_b, double distance) const {
+   std::map<LandmarkIdType, cv::Point2f> pts_a_pred_on_b;
+   auto cam = cams.at(camera_index);
++  if (distance <= 0) {
++    distance = _config.landmark_distance_assumption;
++  }
+   for (unsigned int i = 0; i < pts_3d_norm.size(); i++) {
+-    Vector3d landmark_pos_cam =
+-        pts_3d_norm[i] * _config.landmark_distance_assumption;
++    Vector3d landmark_pos_cam = pts_3d_norm[i] * distance;
+     Vector3d pt3d = cam_pose_a * landmark_pos_cam;
+     Vector2d pt2d_pred;
+     Vector3d pos_cam_b_pred = cam_pose_b.inverse() * pt3d;
+diff --git a/d2frontend/src/d2frontend_params.cpp b/d2frontend/src/d2frontend_params.cpp
+index 93fa295..743b4ff 100644
+--- a/d2frontend/src/d2frontend_params.cpp
++++ b/d2frontend/src/d2frontend_params.cpp
+@@ -191,6 +191,12 @@ D2FrontendParams::D2FrontendParams(ros::NodeHandle& nh) {
+   if (!fsSettings["enable_cross_cam_track"].empty()) {
+     ftconfig->enable_cross_cam_track = (int)fsSettings["enable_cross_cam_track"];
+   }
++  if (!fsSettings["cross_cam_guess_distance"].empty()) {
++    ftconfig->cross_cam_guess_distance = (double)fsSettings["cross_cam_guess_distance"];
++  }
++  if (!fsSettings["cross_cam_min_disparity"].empty()) {
++    ftconfig->cross_cam_min_disparity = (double)fsSettings["cross_cam_min_disparity"];
++  }
+   // Loop detector
+   loopdetectorconfig->enable_homography_test =
+       (int)fsSettings["enable_homography_test"];
+diff --git a/d2frontend/src/opticaltrack_utils.cpp b/d2frontend/src/opticaltrack_utils.cpp
+index f5a06d6..3c94bd8 100644
+--- a/d2frontend/src/opticaltrack_utils.cpp
++++ b/d2frontend/src/opticaltrack_utils.cpp
+@@ -280,7 +280,8 @@ LKImageInfoGPU opticalflowTrackPyr(const cv::Mat &cur_img,
+ 
+ LKImageInfoCPU opticalflowTrackPyr(const cv::Mat &cur_img,
+                                    const LKImageInfoCPU &prev_lk,
+-                                   TrackLRType type) {
++                                   TrackLRType type,
++                                   const std::map<LandmarkIdType, cv::Point2f> *guess) {
+   auto cur_pyr = buildImagePyramid(cur_img, PYR_LEVEL);
+   auto ids = prev_lk.lk_ids;
+   auto prev_pts = prev_lk.lk_pts;
+@@ -304,7 +305,15 @@ LKImageInfoCPU opticalflowTrackPyr(const cv::Mat &cur_img,
+   } else {
+     status.resize(prev_pts.size());
+     std::fill(status.begin(), status.end(), 0);
+-    if (type == LEFT_RIGHT_IMG_MATCH) {
++    if (guess) {
++      for (unsigned int i = 0; i < prev_pts.size(); i++) {
++        auto it = guess->find(ids[i]);
++        if (it != guess->end() && inBorder(it->second, cur_img.size())) {
++          status[i] = 1;
++          cur_pts.push_back(it->second);
++        }
++      }
++    } else if (type == LEFT_RIGHT_IMG_MATCH) {
+       for (unsigned int i = 0; i < prev_pts.size(); i++) {
+         auto pt = prev_pts[i];
+         if (pt.x < cur_img.cols - move_cols) {
+@@ -337,10 +346,18 @@ LKImageInfoCPU opticalflowTrackPyr(const cv::Mat &cur_img,
+   std::vector<float> err;
+   std::vector<uchar> reverse_status;
+   std::vector<cv::Point2f> reverse_pts;
+-  //TODO: Use pyr correctly
+-  cv::calcOpticalFlowPyrLK(prev_lk.pyr[0], cur_pyr[0], prev_pts, cur_pts, status, err, WIN_SIZE, PYR_LEVEL);
++  // the shifted guess in cur_pts is the cross-camera prediction; without USE_INITIAL_FLOW it is ignored
++  const cv::TermCriteria crit(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01);
++  const std::vector<cv::Point2f> start_pts = cur_pts;
++  cv::calcOpticalFlowPyrLK(prev_lk.pyr[0], cur_pyr[0], prev_pts, cur_pts, status, err, WIN_SIZE, PYR_LEVEL,
++                           crit, cv::OPTFLOW_USE_INITIAL_FLOW);
+   reverse_pts = cur_pts;
+-  for (unsigned int i = 0; i < prev_pts.size(); i++) {
++  if (guess) {  // start the backward pass as far from the answer as the forward pass started
++    for (unsigned int i = 0; i < prev_pts.size(); i++) {
++      reverse_pts[i] = prev_pts[i] + (cur_pts[i] - start_pts[i]);
++    }
++  }
++  for (unsigned int i = 0; i < prev_pts.size() && !guess; i++) {
+     auto &pt = reverse_pts[i];
+     if (type == LEFT_RIGHT_IMG_MATCH && status[i] == 1) {
+       pt.x -= move_cols;
+@@ -349,8 +366,8 @@ LKImageInfoCPU opticalflowTrackPyr(const cv::Mat &cur_img,
+       pt.x += move_cols;
+     }
+   }
+-  //TODO: Use pyr correctly
+-  cv::calcOpticalFlowPyrLK(cur_pyr[0], prev_lk.pyr[0], cur_pts, reverse_pts, reverse_status, err, WIN_SIZE, PYR_LEVEL);
++  cv::calcOpticalFlowPyrLK(cur_pyr[0], prev_lk.pyr[0], cur_pts, reverse_pts, reverse_status, err, WIN_SIZE, PYR_LEVEL,
++                           crit, cv::OPTFLOW_USE_INITIAL_FLOW);
+ 
+   for (size_t i = 0; i < status.size(); i++) {
+     if (status[i] && reverse_status[i] &&

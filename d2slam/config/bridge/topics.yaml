@@ -1,0 +1,7 @@
+# ros1_bridge parameter_bridge: topics crossing between ROS 2 (sim, PX4 side) and ROS 1 (D2VINS).
+topics:
+  - {topic: /imu, type: sensor_msgs/msg/Imu, queue_size: 500}
+  - {topic: /quadcam/image, type: sensor_msgs/msg/Image, queue_size: 5}
+  - {topic: /d2vins/imu_propagation, type: nav_msgs/msg/Odometry, queue_size: 50}
+  - {topic: /d2vins/odometry, type: nav_msgs/msg/Odometry, queue_size: 10}
+  - {topic: /d2vins/margined_cloud, type: sensor_msgs/msg/PointCloud, queue_size: 20}

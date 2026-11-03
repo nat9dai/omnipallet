@@ -1,0 +1,26 @@
+From dd74ff65e0f129276c6e3cabfbe6cb6d99c2785f Mon Sep 17 00:00:00 2001
+From: Nuthasith Gerdpratoom <nuthasith.g@gmail.com>
+Date: Tue, 20 Oct 2026 21:57:49 +0800
+Subject: [PATCH 1/4] CPU fallback for quad-cam cylinder undistortion
+
+---
+ d2frontend/src/loop_cam.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/d2frontend/src/loop_cam.cpp b/d2frontend/src/loop_cam.cpp
+index 694691f..9112f79 100644
+--- a/d2frontend/src/loop_cam.cpp
++++ b/d2frontend/src/loop_cam.cpp
+@@ -270,7 +270,11 @@ VisualImageDesc LoopCam::generateImageDescriptor(const StereoFrame &msg,
+ #ifdef USE_CUDA
+     undist = cv::Mat(undistortors[vcam_id]->undist_id_cuda(undist, 0, true));
+ #else
+-    SPDLOG_WARN("Undistort image not supported without CUDA");
++    // CPU fallback: the same cylinder remap the CUDA path uses (map 0 = cylinder)
++    cv::Mat out;
++    cv::remap(undist, out, undistortors[vcam_id]->undistMaps[0].first,
++              undistortors[vcam_id]->undistMaps[0].second, cv::INTER_LINEAR);
++    undist = out;
+ #endif
+   }
+   if (params->enable_perf_output) {
